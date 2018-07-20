@@ -1,0 +1,325 @@
+/*
+ * Copyright (c) 2018 Kyle Hofer
+ * Email: kylehofer@neurak.com.au
+ * Web: https://neurak.com.au/
+ *
+ * This file is part of Calibrator.
+ *
+ * Calibrator is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Calibrator is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+static Small_Sensor_Data_t SENSOR_DATA, SENSOR_DATA_MIN, SENSOR_DATA_MAX, SENSOR_DATA_EXPECTED;
+static Large_Sensor_Data_t SENSOR_DATA_TOTAL;
+
+/*
+ * Sensor Data Modifier Methods
+ * Used to store and modify Sensor Data structs
+ */
+
+void SENSORDATA_min(Small_Sensor_Data_t *to, Small_Sensor_Data_t *from) {
+	for (uint8_t i = 0; i < SMALL_SENSOR_DATA_FIELDS_LEN; i++)
+		if (to->raw[i] > from->raw[i])
+			to->raw[i] = from->raw[i];
+}
+
+void SENSORDATA_max(Small_Sensor_Data_t *to, Small_Sensor_Data_t *from) {
+	for (uint8_t i = 0; i < SMALL_SENSOR_DATA_FIELDS_LEN; i++)
+		if (to->raw[i] < from->raw[i])
+			to->raw[i] = from->raw[i];
+}
+
+void SENSORDATA_copy(Small_Sensor_Data_t *to, Small_Sensor_Data_t *from) {
+	for (uint8_t i = 0; i < SMALL_SENSOR_DATA_FIELDS_LEN; i++)
+		to->raw[i] = from->raw[i];
+}
+
+void SENSORDATA_copy(Large_Sensor_Data_t *to, Large_Sensor_Data_t *from) {
+	for (uint8_t i = 0; i < LARGE_SENSOR_DATA_FIELDS_LEN; i++)
+		to->raw[i] = from->raw[i];
+}
+
+void SENSORDATA_addToTotal(Large_Sensor_Data_t *to, Small_Sensor_Data_t *from) {
+	for (uint8_t i = 0; i < SMALL_SENSOR_DATA_FIELDS_LEN; i++)
+		to->raw[i] += from->raw[i];
+}
+
+void SENSORDATA_calculateAverage(Small_Sensor_Data_t *to, Large_Sensor_Data_t *from) {
+	for (uint8_t i = 0; i < SMALL_SENSOR_DATA_FIELDS_LEN; i++)
+		to->raw[i] = from->raw[i] / AVERAGE_MAX;
+}
+
+/*
+ * MPU6050 Methods
+ * Used to communicate with the MPU6050 over I2C
+ */
+
+void MPU6050_sensor_read() {
+	Wire.beginTransmission(MPU6050_ADDRESS);
+	Wire.write(ACCEL_XOUT_H);							// Requesting access to 0x3B
+	Wire.endTransmission(false);						// Keeping Transmission open
+	Wire.requestFrom(MPU6050_ADDRESS, MPU6050_DATA_SIZE, true);	// Request a total of 14 registers and closing transmission
+
+	SENSOR_DATA.fields = {
+		Wire.read() << 8 | Wire.read(),		// 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)
+		Wire.read() << 8 | Wire.read(),		// 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
+		Wire.read() << 8 | Wire.read(),		// 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
+		Wire.read() << 8 | Wire.read(),		// 0x41 (TEMP_OUT_H) & 0x42 (TEMP_OUT_L)
+		Wire.read() << 8 | Wire.read(),		// 0x43 (GYRO_XOUT_H) & 0x44 (GYRO_XOUT_L)
+		Wire.read() << 8 | Wire.read(),		// 0x45 (GYRO_YOUT_H) & 0x46 (GYRO_YOUT_L)
+		Wire.read() << 8 | Wire.read()		// 0x47 (GYRO_ZOUT_H) & 0x48 (GYRO_ZOUT_L)
+	};
+}
+
+void MPU6050_write_byte(uint16_t start, uint8_t data) {
+	Wire.beginTransmission(MPU6050_ADDRESS);
+	Wire.write(start);						// Requesting access to address in start
+	Wire.write(&data, 1);					// Write data byte
+	Wire.endTransmission(true); 			// Closing Transmission
+}
+
+void MPU6050_read_byte(int start, uint8_t *buffer) {	 
+	Wire.beginTransmission(MPU6050_ADDRESS);
+	Wire.write(start);							// Requesting access to address in start
+	Wire.endTransmission(false);				// Keeping Transmission open
+	Wire.requestFrom(MPU6050_ADDRESS, 1, true);	// Request 1 byte and closing transmission
+	buffer[0] = Wire.read();
+}
+
+bool MPU6050_init() {
+	Wire.begin();
+
+	Serial.println(F("Starting up I2C Interface..."));
+	Serial.println(F("Connecting to MPU6050..."));
+
+	uint8_t data;								//Used to both read and write data to the MPU6050
+
+	MPU6050_read_byte(WHO_AM_I, &data);			// Reading WHO_AM_I Register to test connection
+
+	if (data != 0x68) {							// MPU6050 not found
+		Serial.println(F("Connection Failed, Please connect the device try again."));
+		Wire.end();
+		return false;							// No connection
+	}
+
+	Serial.println(F("Connection successful."));
+	Serial.print(F("Waking up the MPU6050"));
+
+	for (int i = 0; i < 5; ++i) {
+		delay(225);
+		Serial.print(F("."));
+	}
+
+	Serial.println(F(" *SLAP*"));
+	delay(550);
+	Serial.println();
+
+	Serial.println(F("Device is awake, Please configure the device for tests."));
+
+	MPU6050_write_byte(PWR_MGMT_1, 0);		// Wake up the MPU-6050
+
+	/*
+	 * User Inputs for setting up the MPU6050
+	 */
+
+	char reply;
+
+	for (;;) {
+		Serial.print(F("Choose a setting for the Digital Low Pass Filter [0-6]: "));
+		reply = waitForInput();
+		Serial.println(reply);
+		if (reply > 47 && reply < 55)	//Ascii 0-6
+			break;		
+	}
+
+	switch(reply) {
+		case 49:	// 1
+			data = _BV(DLPF_CFG_0);
+			break;
+		case 50:	// 2
+			data = _BV(DLPF_CFG_1);
+			break;
+		case 51:	// 3
+			data = _BV(DLPF_CFG_1) | _BV(DLPF_CFG_0);
+			break;
+		case 52:	// 4
+			data = _BV(DLPF_CFG_2);
+			break;
+		case 53:	// 5
+			data = _BV(DLPF_CFG_2) | _BV(DLPF_CFG_0);
+			break;
+		case 54:	// 6
+			data = _BV(DLPF_CFG_2) | _BV(DLPF_CFG_1);
+			break;
+		default:
+			data = 0;
+	}
+
+	MPU6050_write_byte(MPU6050_CONFIG, data); 	// Setting Digital Low Pass Filter
+
+	for (;;) {
+		Serial.print(F("Choose a setting for the Gyro Sensitivity [0-3]: "));
+		reply = waitForInput();
+		Serial.println(reply);
+		if (reply > 47 && reply < 52)	//Ascii 0-3
+			break;		
+	}
+
+	switch(reply) {
+		case 49:	// 1
+			data = _BV(FS_SEL_0);
+			break;
+		case 50:	// 2
+			data = _BV(FS_SEL_1);
+			break;
+		case 51:	// 3
+			data = _BV(FS_SEL_1) | _BV(FS_SEL_0);
+			break;
+		default:
+			data = 0;
+	}
+
+	MPU6050_write_byte(GYRO_CONFIG, data);		// Setting Gyro Sensitivity
+
+	for (;;) {
+		Serial.print(F("Choose a setting for the Accelerometer Sensitivity [0-3]: "));
+		reply = waitForInput();
+		Serial.println(reply);
+		if (reply > 47 && reply < 52)	//Ascii 0-3
+			break;	
+	}
+
+	switch(reply) {
+		case 49:	// 1
+			data = _BV(AFS_SEL_0);
+			SENSOR_DATA_EXPECTED.fields.AccZ >>= 1;	//Setting the Expected AccZ to match sensitivity
+			break;
+		case 50:	// 2
+			data = _BV(AFS_SEL_1);
+			SENSOR_DATA_EXPECTED.fields.AccZ >>= 2;
+			break;
+		case 51:	// 3
+			data = _BV(AFS_SEL_1) | _BV(AFS_SEL_0);
+			SENSOR_DATA_EXPECTED.fields.AccZ >>= 3;
+			break;
+		default:
+			data = 0;
+	}
+
+	MPU6050_write_byte(ACCEL_CONFIG, data);		// Setting Accelerometer Sensitivity
+
+	Serial.println();
+	Serial.println(F("Place the device on a flat surface, and make sure it won't move while calculating the average."));
+	Serial.println(F("This will take roughly 12.5 seconds."));
+	Serial.println(F("Send any data to begin calculations..."));
+	waitForInput();
+	Serial.println(F("Average data is being calculated, please don't move the device."));
+	Serial.println();
+	Serial.print(F("	["));
+	return true;							// Connection Successful
+}
+
+void CALIBRATOR_calculate() {
+	uint8_t avgCount = 0;
+
+	while(avgCount < AVERAGE_MAX) {
+		delay(TIME_DELAY);
+		MPU6050_sensor_read();				// Reading data from MPU6050
+
+		if (avgCount % 15 == 0)
+			Serial.print(F("#"));			// Printing Progress Bar
+
+		sensorData_min(&SENSOR_DATA_MIN, &SENSOR_DATA);	//Storing Minimum Readings
+		sensorData_max(&SENSOR_DATA_MAX, &SENSOR_DATA);	//Storing Maximum Readings
+
+		sensorData_addToTotal(&SENSOR_DATA_TOTAL, &SENSOR_DATA);	//Storing Average Readings
+
+		avgCount++;
+	}
+}
+
+void CALIBRATOR_display() {
+	Serial.println(F("]"));
+	Serial.println();
+
+	Serial.println(F("Average Readings Complete, Data averages shown below:"));
+
+	sensorData_calculateAverage(&SENSOR_DATA, &SENSOR_DATA_TOTAL);
+
+	Serial.println(F("--------  Accelerometer Data  --------"));
+	Serial.print(F("Min/Max X:	"));Serial.print(SENSOR_DATA_MIN.fields.AccX);
+	Serial.print(F("/"));Serial.println(SENSOR_DATA_MAX.fields.AccX);
+	Serial.print(F("Average X:	"));Serial.println(SENSOR_DATA.fields.AccX);
+	Serial.print(F("Expected X:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.AccX);
+	Serial.println();
+
+	Serial.print(F("Min,Max Y:	"));Serial.print(SENSOR_DATA_MIN.fields.AccY);
+	Serial.print(F("/"));Serial.println(SENSOR_DATA_MAX.fields.AccY);
+	Serial.print(F("Average Y:	"));Serial.println(SENSOR_DATA.fields.AccY);
+	Serial.print(F("Expected Y:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.AccY);
+	Serial.println();
+
+	Serial.print(F("Min/Max Z:	"));Serial.print(SENSOR_DATA_MIN.fields.AccZ);
+	Serial.print(F("/"));Serial.println(SENSOR_DATA_MAX.fields.AccZ);
+	Serial.print(F("Average Z:	"));Serial.println(SENSOR_DATA.fields.AccZ);
+	Serial.print(F("Expected Z:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.AccZ);
+	Serial.println();
+
+	Serial.print(F("Calibrated X:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.AccX - SENSOR_DATA.fields.AccX);
+	Serial.print(F("Calibrated Y:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.AccY - SENSOR_DATA.fields.AccY);
+	Serial.print(F("Calibrated Z:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.AccZ - SENSOR_DATA.fields.AccZ);
+
+	Serial.println();
+
+	Serial.println(F("--------  Gyro Data  --------"));
+	Serial.print(F("Min/Max X:	"));Serial.print(SENSOR_DATA_MIN.fields.GyrX);
+	Serial.print(F("/"));Serial.println(SENSOR_DATA_MAX.fields.GyrX);
+	Serial.print(F("Average X:	"));Serial.println(SENSOR_DATA.fields.GyrX);
+	Serial.print(F("Expected X:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.GyrX);
+	Serial.println();	
+
+	Serial.print(F("Min/Max Y:	"));Serial.print(SENSOR_DATA_MIN.fields.GyrY);
+	Serial.print(F("/"));Serial.println(SENSOR_DATA_MAX.fields.GyrY);
+	Serial.print(F("Average Y:	"));Serial.println(SENSOR_DATA.fields.GyrY);
+	Serial.print(F("Expected Y:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.GyrY);
+	Serial.println();
+
+	Serial.print(F("Min/Max Z:	"));Serial.print(SENSOR_DATA_MIN.fields.GyrZ);
+	Serial.print(F("/"));Serial.println(SENSOR_DATA_MAX.fields.GyrZ);
+	Serial.print(F("Average Z:	"));Serial.println(SENSOR_DATA.fields.GyrZ);
+	Serial.print(F("Expected Z:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.GyrZ);
+	Serial.println();
+
+	Serial.print(F("Calibrated X:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.GyrX - SENSOR_DATA.fields.GyrX);
+	Serial.print(F("Calibrated Y:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.GyrY - SENSOR_DATA.fields.GyrY);
+	Serial.print(F("Calibrated Z:	"));Serial.println(SENSOR_DATA_EXPECTED.fields.GyrZ - SENSOR_DATA.fields.GyrZ);
+
+	Serial.println();
+
+	Serial.println(F("--------  Temperature Data  --------"));
+	Serial.print(F("Average Temp:	"));Serial.println(SENSOR_DATA.fields.Temp);
+	Serial.print(F("Min Temp:	"));Serial.println(SENSOR_DATA_MIN.fields.Temp);
+	Serial.print(F("Max Temp:	"));Serial.println(SENSOR_DATA_MAX.fields.Temp);
+}
+
+uint8_t CALIBRATOR_waitForInput() {
+	int8_t data = 0;
+	while (Serial.available() && Serial.read());	// empty buffer
+	while (!Serial.available());					// wait for data
+	while (Serial.available() && (data = Serial.read()));	// empty buffer again	
+	return data;
+}
+
+void CALIBRATOR_init() {
+
+}
